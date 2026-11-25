@@ -87,6 +87,11 @@ function extractCycleYear(cycle: string): string {
   return match ? match[1] : new Date().getFullYear().toString();
 }
 
+function getTwoPartName(fullName: string): string {
+  const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  return parts.slice(0, 2).join(' ') || '---';
+}
+
 function generateCycleOptions() {
   const options = [];
   const today = new Date();
@@ -141,6 +146,14 @@ export default function App() {
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [passwordSavedMsg, setPasswordSavedMsg] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isLandscapeForced, setIsLandscapeForced] = useState(true);
+  const [isMobilePortrait, setIsMobilePortrait] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const isMobile =
+      /android|iphone|ipad|ipod|mobile/i.test(window.navigator.userAgent) ||
+      window.matchMedia('(pointer: coarse)').matches;
+    return isMobile && window.innerWidth < window.innerHeight && window.innerWidth < 768;
+  });
   const [saveDialog, setSaveDialog] = useState<{
     type: 'pdf' | 'excel';
     employees: Employee[];
@@ -173,31 +186,64 @@ export default function App() {
   }, []);
 
   React.useEffect(() => {
-    const tryLockLandscape = async () => {
-      const isStandalone =
-        window.matchMedia('(display-mode: standalone)').matches ||
-        (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      window.matchMedia('(display-mode: fullscreen)').matches ||
+      (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+    const isMobileDevice =
+      /android|iphone|ipad|ipod|mobile/i.test(window.navigator.userAgent) ||
+      window.matchMedia('(pointer: coarse)').matches;
 
-      if (isStandalone) {
-        try {
-          const orientation = screen.orientation as unknown as { lock?: (mode: string) => Promise<void> };
-          await orientation?.lock?.('landscape');
-        } catch {
-          // Browsers may restrict orientation.lock outside fullscreen
+    const updateMobilePortrait = () => {
+      setIsMobilePortrait(
+        isMobileDevice && window.innerWidth < window.innerHeight && window.innerWidth < 768
+      );
+    };
+    updateMobilePortrait();
+
+    const tryLockLandscape = async (allowFullscreen = false) => {
+      if (!isLandscapeForced) return;
+      if (!isStandalone && !isMobileDevice) return;
+      try {
+        if (allowFullscreen && !document.fullscreenElement && document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen().catch(() => {});
         }
+        const orientation = screen.orientation as unknown as { lock?: (mode: string) => Promise<void> };
+        await orientation?.lock?.('landscape');
+      } catch {
+        // Fallback CSS rotation handles portrait mobile browsers seamlessly
       }
     };
 
-    tryLockLandscape();
+    if (isLandscapeForced) {
+      tryLockLandscape(false);
+    }
+
+    const handleFirstMobileTouch = () => {
+      if (isLandscapeForced && isMobileDevice && window.innerWidth < window.innerHeight) {
+        tryLockLandscape(true);
+      }
+    };
+
+    if (isMobileDevice) {
+      window.addEventListener('touchstart', handleFirstMobileTouch, { once: true, passive: true });
+      window.addEventListener('pointerdown', handleFirstMobileTouch, { once: true, passive: true });
+    }
 
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
     document.addEventListener('fullscreenchange', handleFullscreenChange);
+    window.addEventListener('resize', updateMobilePortrait);
+    window.addEventListener('orientationchange', updateMobilePortrait);
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('resize', updateMobilePortrait);
+      window.removeEventListener('orientationchange', updateMobilePortrait);
+      window.removeEventListener('touchstart', handleFirstMobileTouch);
+      window.removeEventListener('pointerdown', handleFirstMobileTouch);
     };
-  }, []);
+  }, [isLandscapeForced]);
 
   const saveCurrentData = (data: Employee[], cycle: string) => {
     if (data.length === 0) return;
@@ -467,8 +513,8 @@ export default function App() {
 
     const baseName =
       targetEmployees.length === 1
-        ? `قسيمة_راتب_${targetEmployees[0].name.trim()}`
-        : `قسائم_الرواتب_${selectedCycle}`;
+        ? targetEmployees[0].name.trim()
+        : selectedCycle;
 
     setSaveDialogError('');
     setSaveDialog({
@@ -741,18 +787,43 @@ export default function App() {
   };
 
   const toggleLandscapeFullscreen = async () => {
-    try {
-      if (!document.fullscreenElement) {
-        await document.documentElement.requestFullscreen();
-        const orientation = screen.orientation as unknown as { lock?: (mode: string) => Promise<void> };
-        await orientation?.lock?.('landscape');
-      } else {
+    const currentlyActive = isFullscreen || (isMobilePortrait && isLandscapeForced);
+    if (currentlyActive) {
+      setIsLandscapeForced(false);
+      try {
         const orientation = screen.orientation as unknown as { unlock?: () => void };
         orientation?.unlock?.();
-        await document.exitFullscreen();
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        }
+      } catch {
+        // Ignore if unlock/exitFullscreen not active
       }
-    } catch {
-      // Orientation lock / fullscreen not supported on this browser
+    } else {
+      setIsLandscapeForced(true);
+      try {
+        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen();
+        }
+        const orientation = screen.orientation as unknown as { lock?: (mode: string) => Promise<void> };
+        await orientation?.lock?.('landscape');
+      } catch {
+        // Fallback CSS rotation handles portrait mobile browsers seamlessly
+      }
+    }
+  };
+
+  const handleShareSelected = async () => {
+    const selected = employeesData.filter(e => e.selected);
+    for (const emp of selected) {
+      await shareEmployeePdf(emp);
+    }
+  };
+
+  const handleEditSelected = () => {
+    const idx = employeesData.findIndex(e => e.selected);
+    if (idx !== -1) {
+      handleEditClick(idx, employeesData[idx]);
     }
   };
 
@@ -905,52 +976,61 @@ export default function App() {
     );
   }
 
+  const isLandscapeActive = isFullscreen || (isMobilePortrait && isLandscapeForced);
+  const rotatedMobileClasses =
+    isMobilePortrait && isLandscapeForced
+      ? 'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rotate-90 w-[100dvh] h-[100vw]'
+      : 'w-full h-dvh';
+
   return (
-    <div className="flex flex-col min-h-screen md:h-screen w-full bg-slate-50 text-slate-800 font-sans overflow-x-hidden" dir="rtl">
+    <div
+      className={`flex flex-col ${rotatedMobileClasses} bg-slate-50 text-slate-800 font-sans overflow-y-auto overflow-x-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden md:overflow-hidden`}
+      dir="rtl"
+    >
       {/* Header */}
-      <header className="bg-indigo-950 text-white px-3 sm:px-6 py-3 sm:py-4 flex justify-between items-center shrink-0 border-b-4 border-indigo-500 gap-2">
-        <div className="flex items-center gap-2 sm:gap-4">
-          <button onClick={() => setIsSidebarOpen(true)} className="p-2 hover:bg-indigo-800 rounded-lg transition-colors shrink-0">
-            <Menu className="w-6 h-6" />
+      <header className="bg-indigo-950 text-white px-2 sm:px-4 py-1.5 sm:py-2.5 flex justify-between items-center shrink-0 border-b-2 sm:border-b-4 border-indigo-500 gap-1.5">
+        <div className="flex items-center gap-1.5 sm:gap-3">
+          <button onClick={() => setIsSidebarOpen(true)} className="p-1.5 hover:bg-indigo-800 rounded-lg transition-colors shrink-0">
+            <Menu className="w-5 h-5" />
           </button>
-          <div className="w-9 h-9 sm:w-10 sm:h-10 bg-indigo-500 rounded-lg flex items-center justify-center text-xl sm:text-2xl font-black shrink-0">M</div>
+          <div className="w-7 h-7 sm:w-8 sm:h-8 bg-indigo-500 rounded-lg flex items-center justify-center text-base sm:text-lg font-black shrink-0">M</div>
           <div className="hidden sm:block">
-            <h1 className="text-xl font-bold leading-tight">مُرَتَّبَا | <span className="text-indigo-300 font-medium">Morattaba</span></h1>
-            <p className="text-xs text-indigo-200 opacity-80">نظام إدارة وتصدير قسائم رواتب الموظفين v2.4</p>
+            <h1 className="text-sm sm:text-base font-bold leading-tight">مُرَتَّبَا | <span className="text-indigo-300 font-medium">Morattaba</span></h1>
+            <p className="text-[10px] text-indigo-200 opacity-80">نظام إدارة وتصدير قسائم رواتب الموظفين v2.4</p>
           </div>
         </div>
-        <div className="flex gap-1.5 sm:gap-2 items-center">
-          <div className="hidden lg:flex items-center gap-2 bg-slate-800/50 px-3 py-1.5 rounded-md border border-slate-700">
+        <div className="flex gap-1 sm:gap-1.5 items-center">
+          <div className="hidden lg:flex items-center gap-1.5 bg-slate-800/50 px-2.5 py-1 rounded-md border border-slate-700">
             <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-            <span className="text-xs font-medium">{isOnline ? 'المتصفح: متصل' : 'وضع عدم الاتصال'}</span>
+            <span className="text-[11px] font-medium">{isOnline ? 'المتصفح: متصل' : 'وضع عدم الاتصال'}</span>
           </div>
           <PWAInstallButton />
           <button
             onClick={toggleLandscapeFullscreen}
-            className="flex items-center gap-1.5 bg-indigo-800/80 hover:bg-indigo-700 border border-indigo-400/40 px-2.5 py-2 rounded text-xs font-bold text-indigo-100 transition-colors cursor-pointer"
-            title="فتح بعرض الشاشة (الوضع الأفقي)"
+            className="flex items-center gap-1 bg-indigo-800/80 hover:bg-indigo-700 border border-indigo-400/40 px-2 py-1.5 rounded text-[11px] font-bold text-indigo-100 transition-colors cursor-pointer"
+            title={isLandscapeActive ? 'إلغاء عرض الشاشة' : 'فتح بعرض الشاشة (الوضع الأفقي)'}
           >
-            {isFullscreen ? <Minimize2 className="w-4 h-4 shrink-0" /> : <Maximize2 className="w-4 h-4 shrink-0" />}
-            <span className="hidden md:inline">{isFullscreen ? 'إنهاء العرض' : 'عرض الشاشة'}</span>
+            {isLandscapeActive ? <Minimize2 className="w-3.5 h-3.5 shrink-0" /> : <Maximize2 className="w-3.5 h-3.5 shrink-0" />}
+            <span className="hidden md:inline">{isLandscapeActive ? 'إنهاء العرض' : 'عرض الشاشة'}</span>
           </button>
           <button
             onClick={lockAppNow}
-            className="flex items-center gap-1.5 bg-rose-600/90 hover:bg-rose-700 px-2.5 py-2 rounded text-xs font-bold text-white transition-colors cursor-pointer"
+            className="flex items-center gap-1 bg-rose-600/90 hover:bg-rose-700 px-2 py-1.5 rounded text-[11px] font-bold text-white transition-colors cursor-pointer"
             title="إيقاف وقفل التطبيق"
           >
-            <Lock className="w-4 h-4 shrink-0" />
+            <Lock className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden md:inline">قفل التطبيق</span>
           </button>
           <button
             onClick={handleSaveAndArchiveToSidebar}
-            className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 px-2.5 sm:px-3.5 py-2 rounded text-xs sm:text-sm font-bold text-white shadow-sm transition-colors cursor-pointer"
+            className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 px-2 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-bold text-white shadow-sm transition-colors cursor-pointer"
             title="حفظ وترحيل الراتب في القائمة الجانبية أسفل العام"
           >
-            <Save className="w-4 h-4 shrink-0" />
+            <Save className="w-3.5 h-3.5 shrink-0" />
             <span>حفظ</span>
           </button>
-          <label className="cursor-pointer bg-indigo-600 hover:bg-indigo-700 px-3 sm:px-4 py-2 rounded text-xs sm:text-sm font-bold shadow-sm transition-colors flex items-center gap-1.5 sm:gap-2">
-             <Upload className="w-4 h-4" />
+          <label className="cursor-pointer bg-indigo-600 hover:bg-indigo-700 px-2 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-bold shadow-sm transition-colors flex items-center gap-1.5">
+             <Upload className="w-3.5 h-3.5" />
              <span className="hidden sm:inline">استيراد ملف Excel</span>
              <input type="file" accept=".xlsx, .xls, .csv" className="hidden" onChange={handleFileUpload} />
           </label>
@@ -1170,110 +1250,129 @@ export default function App() {
 
 
       {/* Main Content Area */}
-      <div className="flex-1 mx-0 sm:mx-4 mb-2 sm:mb-4 bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm flex flex-col overflow-hidden min-h-[500px] md:min-h-0">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-3 border-b bg-slate-50 gap-3">
-          <div className="flex flex-wrap items-center gap-4">
-             <h2 className="font-bold text-slate-700">سجل البيانات الحالية</h2>
+      <div className={`${employeesData.length === 0 ? 'flex-1' : 'md:flex-1 md:min-h-0 md:overflow-hidden'} mx-0 sm:mx-3 mb-1 sm:mb-2 bg-white rounded-none sm:rounded-xl border-y sm:border border-slate-200 shadow-sm flex flex-col shrink-0`}>
+        <div className="flex flex-wrap items-center justify-between p-1.5 sm:p-2 border-b bg-slate-50 gap-1.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+             <h2 className="font-bold text-xs sm:text-sm text-slate-700">سجل البيانات الحالية</h2>
              {employeesData.length > 0 && (
                 <button
                    onClick={toggleSelectAll}
-                   className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded text-xs font-bold transition-colors"
+                   className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded text-[10px] sm:text-xs font-bold transition-colors"
                  >
                    {allSelected ? 'إلغاء تحديد الكل' : 'تحديد جميع اللاينات'}
                  </button>
              )}
              {hasSelected && (
-                <button
-                   onClick={handleDeleteSelected}
-                   className="bg-rose-100 hover:bg-rose-200 text-rose-700 px-3 py-1.5 rounded text-xs font-bold transition-colors flex items-center gap-1"
-                 >
-                   <Trash2 className="w-4 h-4" /> حذف المحددة
-                 </button>
+                <>
+                  <button
+                     onClick={handleShareSelected}
+                     className="bg-emerald-100 hover:bg-emerald-200 text-emerald-700 px-2 py-1 rounded text-[10px] sm:text-xs font-bold transition-colors flex items-center gap-1"
+                     title="مشاركة عبر واتساب"
+                   >
+                     <MessageCircle className="w-3.5 h-3.5" /> مشاركة
+                   </button>
+                  <button
+                     onClick={handleEditSelected}
+                     disabled={selectedCount !== 1}
+                     className="bg-indigo-100 hover:bg-indigo-200 disabled:bg-slate-100 disabled:text-slate-400 text-indigo-700 px-2 py-1 rounded text-[10px] sm:text-xs font-bold transition-colors disabled:cursor-not-allowed flex items-center gap-1"
+                     title={selectedCount === 1 ? 'تعديل الموظف المحدد' : 'حدد موظفاً واحداً للتعديل'}
+                   >
+                     <Edit className="w-3.5 h-3.5" /> تعديل
+                   </button>
+                  <button
+                     onClick={handleDeleteSelected}
+                     className="bg-rose-100 hover:bg-rose-200 text-rose-700 px-2 py-1 rounded text-[10px] sm:text-xs font-bold transition-colors flex items-center gap-1"
+                   >
+                     <Trash2 className="w-3.5 h-3.5" /> حذف المحددة
+                   </button>
+                </>
              )}
           </div>
-          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
             <select
               value={selectedCycle}
               onChange={(e) => handleCycleChange(e.target.value)}
-              className="bg-white border border-slate-300 text-slate-700 px-3 py-1.5 rounded text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500 flex-1 sm:flex-none"
+              className="bg-white border border-slate-300 text-slate-700 px-2 py-1 rounded text-[10px] sm:text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500 flex-1 sm:flex-none"
             >
               {cycleOptions.map((opt, i) => (
                 <option key={i} value={opt.value}>{opt.label}</option>
               ))}
             </select>
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="flex items-center gap-1.5 w-full sm:w-auto">
               <button
                 onClick={exportExcel}
                 disabled={!hasSelected}
-                className="flex-1 sm:flex-none justify-center bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white px-3 py-1.5 rounded text-xs font-bold transition-colors disabled:cursor-not-allowed flex items-center gap-1"
+                className="flex-1 sm:flex-none justify-center bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 text-white px-2.5 py-1 rounded text-[10px] sm:text-xs font-bold transition-colors disabled:cursor-not-allowed flex items-center gap-1"
               >
-                <FileSpreadsheet className="w-4 h-4 shrink-0" /> تصدير Excel
+                <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" /> تصدير Excel
               </button>
               <button
                 onClick={exportPdf}
                 disabled={!hasSelected}
-                className="flex-1 sm:flex-none justify-center bg-rose-600 hover:bg-rose-700 disabled:bg-slate-200 disabled:text-slate-400 text-white px-3 py-1.5 rounded text-xs font-bold transition-colors disabled:cursor-not-allowed flex items-center gap-1"
+                className="flex-1 sm:flex-none justify-center bg-rose-600 hover:bg-rose-700 disabled:bg-slate-200 disabled:text-slate-400 text-white px-2.5 py-1 rounded text-[10px] sm:text-xs font-bold transition-colors disabled:cursor-not-allowed flex items-center gap-1"
               >
-                <FileText className="w-4 h-4 shrink-0" /> تصدير PDF
+                <FileText className="w-3.5 h-3.5 shrink-0" /> تصدير PDF
               </button>
             </div>
           </div>
         </div>
-        <div className="flex-1 overflow-auto relative">
+        <div className="md:flex-1 md:min-h-0 md:overflow-y-auto overflow-x-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden relative">
            {employeesData.length > 0 ? (
-              <table className="w-full min-w-[900px] text-xs text-right border-collapse">
+              <table className="w-full table-auto text-[8px] sm:text-[10px] lg:text-[11px] text-right border-collapse">
                   <thead className="bg-slate-900 text-white sticky top-0 z-10 whitespace-nowrap">
                     <tr>
-                      <th className="p-3 border-l border-slate-700 w-10 text-center">
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 w-5 sm:w-7 text-center">
                         <input
                           type="checkbox"
                           checked={allSelected}
                           onChange={toggleSelectAll}
-                          className="accent-indigo-500 w-3 h-3 cursor-pointer"
+                          className="accent-indigo-500 w-2.5 h-2.5 sm:w-3 sm:h-3 cursor-pointer"
                         />
                       </th>
-                      <th className="p-3 border-l border-slate-700 text-center w-10">م</th>
-                      <th className="p-3 border-l border-slate-700">كود الموظف</th>
-                      <th className="p-3 border-l border-slate-700">اسم الموظف</th>
-                      <th className="p-3 border-l border-slate-700 text-center">الحضور</th>
-                      <th className="p-3 border-l border-slate-700 text-center">سلفة</th>
-                      <th className="p-3 border-l border-slate-700 text-center">الأساسي</th>
-                      <th className="p-3 border-l border-slate-700 text-center">بدل انتقالات</th>
-                      <th className="p-3 border-l border-slate-700 text-center">الحوافز</th>
-                      <th className="p-3 border-l border-slate-700 text-center">إضافي قيمة</th>
-                      <th className="p-3 border-l border-slate-700 text-center">تأمينات</th>
-                      <th className="p-3 border-l border-slate-700 text-center">ضرائب</th>
-                      <th className="p-3 border-l border-slate-700 text-center">جزاءات</th>
-                      <th className="p-3 border-l border-slate-700 text-center">تكافل</th>
-                      <th className="p-3 bg-indigo-600 text-center font-bold">الصافي</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center w-5 sm:w-7">م</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">الكود</th>
+                      <th className="py-1.5 px-1 sm:px-1.5 border-l border-slate-700">اسم الموظف</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">الحضور</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">سلفة</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">الأساسي</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">انتقالات</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">حوافز</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">إضافي</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">تأمينات</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">ضرائب</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">جزاءات</th>
+                      <th className="py-1.5 px-0.5 sm:px-1 border-l border-slate-700 text-center">تكافل</th>
+                      <th className="py-1.5 px-0.5 sm:px-1.5 bg-indigo-600 text-center font-bold">الصافي</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                                        {employeesData.map((emp, idx) => (
+                    {employeesData.map((emp, idx) => (
                       editingIndex === idx && editFormData ? (
                         <tr key={idx} className="bg-indigo-50 transition-colors">
-                          <td className="p-2 text-center">
-                             <button onClick={() => handleEditSave(idx)} className="text-emerald-600 bg-emerald-100 p-1.5 rounded-full hover:bg-emerald-200">
-                               <Check className="w-4 h-4" />
-                             </button>
-                             <button onClick={handleEditCancel} className="text-rose-600 bg-rose-100 p-1.5 rounded-full hover:bg-rose-200 mt-1">
-                               <X className="w-4 h-4" />
-                             </button>
+                          <td className="p-0.5 sm:p-1 text-center">
+                             <div className="flex flex-col items-center gap-0.5">
+                               <button onClick={() => handleEditSave(idx)} className="text-emerald-600 bg-emerald-100 p-0.5 sm:p-1 rounded-full hover:bg-emerald-200">
+                                 <Check className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                               </button>
+                               <button onClick={handleEditCancel} className="text-rose-600 bg-rose-100 p-0.5 sm:p-1 rounded-full hover:bg-rose-200">
+                                 <X className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                               </button>
+                             </div>
                           </td>
-                          <td className="p-2 text-center text-slate-500">{emp.serial}</td>
-                          <td className="p-2 font-mono font-bold text-indigo-700">{emp.code}</td>
-                          <td className="p-2 font-bold">{emp.name}</td>
-                          <td className="p-2"><input type="number" value={editFormData.days} onChange={e => handleEditChange('days', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.advance} onChange={e => handleEditChange('advance', e.target.value)} className="w-20 border rounded px-1 py-1 text-center text-xs text-rose-600" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.basic} onChange={e => handleEditChange('basic', e.target.value)} className="w-20 border rounded px-1 py-1 text-center text-xs" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.trans} onChange={e => handleEditChange('trans', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.bonus} onChange={e => handleEditChange('bonus', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs text-emerald-600" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.overtime} onChange={e => handleEditChange('overtime', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.insur} onChange={e => handleEditChange('insur', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.tax} onChange={e => handleEditChange('tax', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs text-rose-600" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.penalty} onChange={e => handleEditChange('penalty', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs text-rose-600" /></td>
-                          <td className="p-2"><input type="number" value={editFormData.takaful} onChange={e => handleEditChange('takaful', e.target.value)} className="w-16 border rounded px-1 py-1 text-center text-xs" /></td>
-                          <td className="p-2 text-center font-black bg-indigo-100 text-indigo-900">{editFormData.net.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                          <td className="p-0.5 sm:p-1 text-center text-slate-500">{emp.serial}</td>
+                          <td className="p-0.5 sm:p-1 text-center font-mono font-bold text-indigo-700">{emp.code}</td>
+                          <td className="p-0.5 sm:p-1 font-bold whitespace-nowrap" title={emp.name}>{getTwoPartName(emp.name)}</td>
+                          <td className="p-0.5"><input type="number" value={editFormData.days} onChange={e => handleEditChange('days', e.target.value)} className="w-8 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px]" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.advance} onChange={e => handleEditChange('advance', e.target.value)} className="w-10 sm:w-14 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px] text-rose-600" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.basic} onChange={e => handleEditChange('basic', e.target.value)} className="w-11 sm:w-16 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px]" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.trans} onChange={e => handleEditChange('trans', e.target.value)} className="w-9 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px]" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.bonus} onChange={e => handleEditChange('bonus', e.target.value)} className="w-9 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px] text-emerald-600" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.overtime} onChange={e => handleEditChange('overtime', e.target.value)} className="w-9 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px]" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.insur} onChange={e => handleEditChange('insur', e.target.value)} className="w-9 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px]" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.tax} onChange={e => handleEditChange('tax', e.target.value)} className="w-9 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px] text-rose-600" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.penalty} onChange={e => handleEditChange('penalty', e.target.value)} className="w-9 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px] text-rose-600" /></td>
+                          <td className="p-0.5"><input type="number" value={editFormData.takaful} onChange={e => handleEditChange('takaful', e.target.value)} className="w-9 sm:w-12 border rounded px-0.5 py-0.5 text-center text-[8px] sm:text-[10px]" /></td>
+                          <td className="p-0.5 sm:p-1 text-center font-black bg-indigo-100 text-indigo-900 tabular-nums">{editFormData.net.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
                         </tr>
                       ) : (
                       <tr
@@ -1281,100 +1380,68 @@ export default function App() {
                         className={`${idx % 2 === 0 ? 'bg-indigo-50/50' : 'bg-white'} hover:bg-indigo-100/50 transition-colors cursor-pointer`}
                         onClick={() => toggleSelect(idx)}
                       >
-                        <td className="p-3 text-center" onClick={(e) => e.stopPropagation()}>
+                        <td className="py-1 px-0.5 sm:px-1 text-center" onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             checked={emp.selected}
                             onChange={() => toggleSelect(idx)}
-                            className="accent-indigo-500 w-3 h-3 cursor-pointer"
+                            className="accent-indigo-500 w-2.5 h-2.5 sm:w-3 sm:h-3 cursor-pointer"
                           />
                         </td>
-                        <td className="p-3 text-center text-slate-500">{emp.serial}</td>
-                        <td className="p-3 font-mono font-bold text-indigo-700">{emp.code}</td>
-                        <td className="p-3">
-                          <div className="flex items-center justify-start gap-2">
-                            <span className="font-bold whitespace-nowrap">{emp.name}</span>
-                            <div className="flex gap-1 shrink-0">
-                              <button
-                                onClick={(e) => { e.stopPropagation(); openSaveDialog('pdf', [emp]); }}
-                                className="text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 p-1.5 rounded-full transition-colors"
-                                title="حفظ قسيمة الراتب PDF"
-                              >
-                                <Download className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); openSaveDialog('excel', [emp]); }}
-                                className="text-teal-600 hover:text-teal-700 bg-teal-50 hover:bg-teal-100 p-1.5 rounded-full transition-colors"
-                                title="حفظ قسيمة الراتب Excel"
-                              >
-                                <FileSpreadsheet className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); shareEmployeePdf(emp); }}
-                                className="text-emerald-600 hover:text-emerald-700 bg-emerald-50 hover:bg-emerald-100 p-1.5 rounded-full transition-colors"
-                                title="مشاركة عبر واتساب"
-                              >
-                                <MessageCircle className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleEditClick(idx, emp); }}
-                                className="text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100 p-1.5 rounded-full transition-colors"
-                                title="تعديل"
-                              >
-                                <Edit className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </div>
+                        <td className="py-1 px-0.5 sm:px-1 text-center text-slate-500">{emp.serial}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center font-mono font-bold text-indigo-700">{emp.code}</td>
+                        <td className="py-1 px-1 sm:px-1.5">
+                          <span className="font-bold whitespace-nowrap truncate block" title={emp.name}>{getTwoPartName(emp.name)}</span>
                         </td>
-                        <td className="p-3 text-center">{emp.days}</td>
-                        <td className="p-3 text-center text-rose-600">{emp.advance ? emp.advance.toLocaleString('en-US') : '0'}</td>
-                        <td className="p-3 text-center">{emp.basic.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                        <td className="p-3 text-center">{emp.trans.toLocaleString('en-US')}</td>
-                        <td className="p-3 text-center text-emerald-600">{emp.bonus.toLocaleString('en-US')}</td>
-                        <td className="p-3 text-center">{emp.overtime.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                        <td className="p-3 text-center">{emp.insur.toLocaleString('en-US')}</td>
-                        <td className="p-3 text-center text-rose-600">{emp.tax.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                        <td className="p-3 text-center text-rose-600">{emp.penalty.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                        <td className="p-3 text-center">{emp.takaful.toLocaleString('en-US')}</td>
-                        <td className="p-3 text-center font-black bg-indigo-50 text-indigo-900">{emp.net.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums">{emp.days}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums text-rose-600">{emp.advance ? emp.advance.toLocaleString('en-US') : '0'}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums">{emp.basic.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums">{emp.trans.toLocaleString('en-US')}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums text-emerald-600">{emp.bonus.toLocaleString('en-US')}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums">{emp.overtime.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums">{emp.insur.toLocaleString('en-US')}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums text-rose-600">{emp.tax.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums text-rose-600">{emp.penalty.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                        <td className="py-1 px-0.5 sm:px-1 text-center tabular-nums">{emp.takaful.toLocaleString('en-US')}</td>
+                        <td className="py-1 px-0.5 sm:px-1.5 text-center tabular-nums font-black bg-indigo-50 text-indigo-900">{emp.net.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
                       </tr>
                       )
                     ))}
                   </tbody>
               </table>
            ) : (
-              <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-4 pt-12">
-                 <FileSpreadsheet className="w-12 h-12 text-slate-300" />
-                 <p className="text-sm">قم برفع ملف Excel لعرض البيانات هنا</p>
+              <div className="flex flex-col items-center justify-center h-full text-slate-400 space-y-2">
+                 <FileSpreadsheet className="w-10 h-10 text-slate-300" />
+                 <p className="text-xs sm:text-sm">قم برفع ملف Excel لعرض البيانات هنا</p>
               </div>
            )}
         </div>
       </div>
       
       {/* KPI Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-2 sm:gap-4 p-2 sm:p-4 shrink-0">
-        <div className="bg-white p-2 sm:p-3 rounded-xl border border-slate-200 shadow-sm col-span-2 md:col-span-1">
-          <p className="text-slate-500 text-xs mb-1 font-bold uppercase tracking-wider">إجمالي الموظفين</p>
-          <p className="text-2xl font-black text-slate-900">{totalCount}</p>
+      <div className="grid grid-cols-3 gap-1.5 sm:gap-3 px-2 sm:px-4 py-1.5 sm:py-2 shrink-0">
+        <div className="bg-white p-1.5 sm:p-2 rounded-lg border border-slate-200 shadow-sm">
+          <p className="text-slate-500 text-[9px] sm:text-xs font-bold uppercase tracking-wider">إجمالي الموظفين</p>
+          <p className="text-sm sm:text-xl font-black text-slate-900">{totalCount}</p>
         </div>
-        <div className="bg-white p-3 rounded-xl border border-indigo-200 shadow-sm ring-2 ring-indigo-500/10">
-          <p className="text-indigo-600 text-xs mb-1 font-bold uppercase tracking-wider">تم تحديدهم للتصدير</p>
-          <p className="text-2xl font-black text-indigo-700">{selectedCount}</p>
+        <div className="bg-white p-1.5 sm:p-2 rounded-lg border border-indigo-200 shadow-sm ring-1 ring-indigo-500/10">
+          <p className="text-indigo-600 text-[9px] sm:text-xs font-bold uppercase tracking-wider">تم تحديدهم للتصدير</p>
+          <p className="text-sm sm:text-xl font-black text-indigo-700">{selectedCount}</p>
         </div>
-        <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
-          <p className="text-slate-500 text-xs mb-1 font-bold uppercase tracking-wider">إجمالي الصافي</p>
-          <p className="text-2xl font-black text-slate-900 text-left tracking-tighter">
-            {totalNet.toLocaleString('en-US', { minimumFractionDigits: 2 })} <span className="text-sm font-normal">ج.م</span>
+        <div className="bg-white p-1.5 sm:p-2 rounded-lg border border-slate-200 shadow-sm">
+          <p className="text-slate-500 text-[9px] sm:text-xs font-bold uppercase tracking-wider">إجمالي الصافي</p>
+          <p className="text-sm sm:text-xl font-black text-slate-900 text-left tracking-tighter tabular-nums">
+            {totalNet.toLocaleString('en-US', { minimumFractionDigits: 2 })} <span className="text-[9px] sm:text-xs font-normal">ج.م</span>
           </p>
         </div>
       </div>
 
       {/* Footer */}
-      <footer className="bg-slate-900 text-slate-400 px-6 py-2 flex justify-between items-center shrink-0 text-[10px]">
+      <footer className="bg-slate-900 text-slate-400 px-3 sm:px-6 py-1 flex justify-between items-center shrink-0 text-[9px] sm:text-[10px]">
          <div>&copy; {new Date().getFullYear()} مُرَتَّبَا - جميع الحقوق محفوظة</div>
-         <div className="flex gap-4">
-            <span>تواصل مع الدعم الفني</span>
-            <span>دليل المستخدم</span>
+         <div className="flex gap-2 sm:gap-4">
+            <span className="hidden sm:inline">تواصل مع الدعم الفني</span>
+            <span className="hidden sm:inline">دليل المستخدم</span>
             <span className="text-indigo-400 font-bold uppercase tracking-widest">SECURE-v2</span>
          </div>
       </footer>
