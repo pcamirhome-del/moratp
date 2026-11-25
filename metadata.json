@@ -1,0 +1,6 @@
+{
+  "name": "مُرَتَّبَا - نظام إدارة قسائم الرواتب",
+  "description": "تطبيق ويب تقدمي (PWA) متكامل لإدارة وتصدير ومشاركة قسائم رواتب الموظفين.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
